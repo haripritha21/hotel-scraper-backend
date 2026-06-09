@@ -20,18 +20,12 @@ app = FastAPI(title="Restaurant Finder API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://bucolic-monstera-7a9c43.netlify.app",
-    ],
-    ...
-)
-    ],
+    allow_origins=["*"],  # 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+   
 SECRET_KEY = "hotel_finder_secret_key_2024"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
