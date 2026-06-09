@@ -24,6 +24,9 @@ app.add_middleware(
         "http://localhost:5173",
         "https://bucolic-monstera-7a9c43.netlify.app",
     ],
+    ...
+)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
