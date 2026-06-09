@@ -7,3 +7,6 @@ cmds = [
   "playwright install chromium",
   "playwright install-deps chromium"
 ]
+
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
