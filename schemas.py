@@ -43,7 +43,8 @@ class Token(BaseModel):
 
 class SearchRequest(BaseModel):
     location: str
-    radius_km: float = 10.0  
+    radius_km: float
+    max_results: int = 10
 
 class AdminLogin(BaseModel):
     username: str
