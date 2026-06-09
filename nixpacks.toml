@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["playwright-driver"]
+nixPkgs = ["chromium", "nss", "nspr", "atk", "cups", "dbus", "libdrm", "mesa", "expat", "xorg.libxcb", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxshmfence", "xorg.libXtst", "pango", "cairo", "alsa-lib"]
 
 [phases.install]
 cmds = [
@@ -10,3 +10,4 @@ cmds = [
 
 [variables]
 NIXPACKS_PYTHON_VERSION = "3.11"
+PLAYWRIGHT_BROWSERS_PATH = "/root/.cache/ms-playwright"
