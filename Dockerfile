@@ -5,9 +5,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# These 2 lines download Chrome browser
-RUN playwright install chromium
 RUN playwright install-deps chromium
+RUN playwright install chromium
+
+# ✅ Move Chrome to the correct location
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
+
+RUN playwright install chromium
 
 COPY . .
 
