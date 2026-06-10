@@ -6,4 +6,6 @@ RUN pip install -r requirements.txt
 RUN python -m playwright install chromium
 RUN python -m playwright install-deps chromium
 COPY . .
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install chromium
 CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
