@@ -5,6 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
+# These 2 lines download Chrome browser
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
