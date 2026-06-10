@@ -2,13 +2,22 @@ import asyncio
 import logging
 import urllib.request
 import json
-from functools import lru_cache
+import os
 from urllib.parse import quote_plus
 
 logger = logging.getLogger(__name__)
 
+FSQ_API_KEY = os.environ.get("FSQ_API_KEY", "")
 
-@lru_cache(maxsize=256)
+BLOCKED_NAMES = (
+    "lodge", "guest house", "guesthouse", "resort", "hostel",
+    "motel", "dormitory", "homestay", "paying guest",
+    "tasmac", "liquor", "wine shop", "bar", "pub", "beer", "toddy",
+)
+
+FOOD_CATEGORY_IDS = "13000,13065,13032,13046,13064,13031,13062,13040,13034"
+
+
 def _geocode_location(location: str):
     parts = [p.strip() for p in location.replace("+", " ").split(",")]
     headers = {"User-Agent": "HotelScraper/1.0 (educational project)"}
@@ -30,83 +39,67 @@ def _geocode_location(location: str):
     return None, None
 
 
-def _overpass_query(lat, lon, radius_m, max_results):
-    query = f"""
-    [out:json][timeout:15];
-    (
-      node["amenity"~"restaurant|cafe|fast_food|food_court|bar|juice_bar|sweet_shop|canteen|dhaba|tiffin|mess|bakery|ice_cream"](around:{radius_m},{lat},{lon});
-      node["amenity"="hotel"](around:{radius_m},{lat},{lon});
-      node["building"~"restaurant|hotel"](around:{radius_m},{lat},{lon});
-    );
-    out body {max_results};
-    """
-    mirrors = [
-        "https://overpass.kumi.systems/api/interpreter",
-        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-        "https://overpass-api.de/api/interpreter",
-    ]
-    data = query.encode("utf-8")
-    for mirror in mirrors:
-        try:
-            req = urllib.request.Request(mirror, data=data, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            req.add_header("User-Agent", "HotelScraper/1.0 (educational project)")
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
-                elements = result.get("elements", [])
-                logger.info("Overpass returned %d elements", len(elements))
-                return elements
-        except Exception as e:
-            logger.warning("Mirror %s failed: %s", mirror, e)
-            continue
-    return []
+def _foursquare_search(lat: float, lon: float, radius_m: int, max_results: int) -> list:
+    url = (
+        f"https://api.foursquare.com/v3/places/search"
+        f"?ll={lat},{lon}"
+        f"&radius={radius_m}"
+        f"&categories={FOOD_CATEGORY_IDS}"
+        f"&limit={min(max_results, 50)}"
+        f"&fields=name,location,tel,rating,categories"
+    )
+    headers = {
+        "Authorization": FSQ_API_KEY,
+        "Accept": "application/json",
+        "User-Agent": "HotelScraper/1.0 (educational project)",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            results = data.get("results", [])
+            logger.info("Foursquare returned %d results", len(results))
+            return results
+    except Exception as e:
+        logger.error("Foursquare API failed: %s", e)
+        return []
 
 
-BLOCKED_CATEGORIES = (
-    "guest_house", "lodge", "resort", "hostel",
-    "motel", "dormitory", "apartment",
-)
-
-BLOCKED_NAMES = (
-    "lodge", "guest house", "guesthouse", "resort",
-    "hostel", "dormitory", "homestay", "paying guest",
-)
-
-
-def _parse_element(element, idx):
-    tags = element.get("tags", {})
-    name = tags.get("name") or tags.get("name:en") or tags.get("name:ta")
-    if not name or len(name.strip()) < 2:
+def _parse_place(place: dict, idx: int):
+    name = place.get("name", "").strip()
+    if not name or len(name) < 2:
         return None
 
+    name_lower = name.lower()
+    if any(x in name_lower for x in BLOCKED_NAMES):
+        return None
+
+    categories = place.get("categories", [])
+    cat_name = categories[0].get("name", "") if categories else ""
+    if any(x in cat_name.lower() for x in ("bar", "pub", "liquor", "wine", "nightclub")):
+        return None
+
+    location = place.get("location", {})
     addr_parts = []
-    for key in ["addr:housenumber", "addr:street", "addr:suburb", "addr:city", "addr:state"]:
-        val = tags.get(key)
+    for key in ["address", "locality", "region"]:
+        val = location.get(key)
         if val:
             addr_parts.append(val)
-    address = ", ".join(addr_parts) if addr_parts else tags.get("addr:full", "N/A")
+    address = ", ".join(addr_parts) if addr_parts else "N/A"
 
-    phone  = tags.get("phone") or tags.get("contact:phone") or "N/A"
-    rating = tags.get("stars") or tags.get("rating") or "N/A"
-
-    amenity  = tags.get("amenity", "")
-    tourism  = tags.get("tourism", "")
-    building = tags.get("building", "")
-    category = amenity or tourism or building
-
-    if any(x in category.lower() for x in BLOCKED_CATEGORIES):
-        return None
-    if any(x in name.lower() for x in BLOCKED_NAMES):
-        return None
+    phone  = place.get("tel", "N/A") or "N/A"
+    rating = place.get("rating", "N/A")
+    if rating != "N/A":
+        rating = str(round(float(rating), 1))
 
     return {
         "sno":      idx + 1,
-        "name":     name.strip(),
+        "name":     name,
         "address":  address,
         "phone":    phone,
         "rating":   str(rating),
-        "source":   "OpenStreetMap",
-        "category": category,
+        "source":   "Foursquare",
+        "category": cat_name,
     }
 
 
@@ -119,17 +112,19 @@ async def fetch_places(location: str, radius_km: float, max_results: int = 10) -
         logger.warning("Could not geocode: %s", location)
         return []
 
-    elements = await asyncio.to_thread(_overpass_query, lat, lon, radius_m, max_results * 2)
-    if not elements:
+    logger.info("Foursquare: %.5f,%.5f radius=%dm max=%d", lat, lon, radius_m, max_results)
+    places = await asyncio.to_thread(_foursquare_search, lat, lon, radius_m, max_results)
+
+    if not places:
         return []
 
     results    = []
     seen_names = set()
 
-    for element in elements:
+    for place in places:
         if len(results) >= max_results:
             break
-        parsed = _parse_element(element, len(results))
+        parsed = _parse_place(place, len(results))
         if not parsed:
             continue
         name_key = parsed["name"].lower().strip()
