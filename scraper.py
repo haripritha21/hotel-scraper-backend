@@ -1,6 +1,7 @@
 """
 Fast OSM scraper — Nominatim geocoding + Overpass API
 No API key. Target: 3-5s response time.
+Food/dining places only — no lodge/guest house/resort.
 """
 
 import asyncio
@@ -39,11 +40,11 @@ def _geocode_location(location: str):
 
 def _overpass_query(lat: float, lon: float, radius_m: int, max_results: int) -> list[dict]:
     query = f"""
-    [out:json][timeout:10];
+    [out:json][timeout:15];
     (
-      node["amenity"~"restaurant|cafe|fast_food|food_court"](around:{radius_m},{lat},{lon});
-      node["tourism"~"hotel|guest_house|motel"](around:{radius_m},{lat},{lon});
+      node["amenity"~"restaurant|cafe|fast_food|food_court|bar|juice_bar|sweet_shop|canteen|dhaba|tiffin|mess|bakery|ice_cream|biryani"](around:{radius_m},{lat},{lon});
       node["amenity"="hotel"](around:{radius_m},{lat},{lon});
+      node["building"~"restaurant|hotel"](around:{radius_m},{lat},{lon});
     );
     out body {max_results};
     """
@@ -76,6 +77,20 @@ def _overpass_query(lat: float, lon: float, radius_m: int, max_results: int) -> 
     return []
 
 
+# ── Eating places only — no stay/accommodation ────────────────────────────────
+ALLOWED_CATEGORIES = (
+    "restaurant", "cafe", "fast_food", "food_court", "bar",
+    "juice_bar", "sweet_shop", "canteen", "dhaba", "tiffin",
+    "mess", "bakery", "ice_cream", "biryani", "hotel", "inn",
+    "residency",
+)
+
+BLOCKED_CATEGORIES = (
+    "guest_house", "lodge", "resort", "hostel", "motel",
+    "dormitory", "apartment",
+)
+
+
 def _parse_element(element: dict, idx: int):
     tags = element.get("tags", {})
 
@@ -83,6 +98,7 @@ def _parse_element(element: dict, idx: int):
     if not name or len(name.strip()) < 2:
         return None
 
+    # Address
     addr_parts = []
     for key in ["addr:housenumber", "addr:street", "addr:suburb", "addr:city", "addr:state"]:
         val = tags.get(key)
@@ -90,14 +106,25 @@ def _parse_element(element: dict, idx: int):
             addr_parts.append(val)
     address = ", ".join(addr_parts) if addr_parts else tags.get("addr:full", "N/A")
 
-    phone = tags.get("phone") or tags.get("contact:phone") or "N/A"
+    phone  = tags.get("phone") or tags.get("contact:phone") or "N/A"
     rating = tags.get("stars") or tags.get("rating") or "N/A"
 
-    amenity = tags.get("amenity", "")
-    tourism = tags.get("tourism", "")
-    category = tourism if tourism else amenity
+    amenity  = tags.get("amenity", "")
+    tourism  = tags.get("tourism", "")
+    building = tags.get("building", "")
+    category = amenity or tourism or building
 
-    if any(x in category.lower() for x in ("lodge", "resort", "hostel")):
+    # Block accommodation places
+    if any(x in category.lower() for x in BLOCKED_CATEGORIES):
+        return None
+
+    # Block by name keywords too
+    name_lower = name.lower()
+    blocked_name_keywords = (
+        "lodge", "guest house", "guesthouse", "resort",
+        "hostel", "dormitory", "homestay", "pg ", "paying guest",
+    )
+    if any(x in name_lower for x in blocked_name_keywords):
         return None
 
     return {
@@ -120,6 +147,7 @@ async def fetch_places(location: str, radius_km: float, max_results: int = 10) -
         logger.warning("Could not geocode: %s", location)
         return []
 
+    logger.info("Fetching: %.5f,%.5f radius=%dm max=%d", lat, lon, radius_m, max_results)
     elements = await asyncio.to_thread(_overpass_query, lat, lon, radius_m, max_results * 2)
 
     if not elements:
@@ -150,3 +178,4 @@ async def fetch_places(location: str, radius_km: float, max_results: int = 10) -
     results.sort(key=_rating_val, reverse=True)
     logger.info("Returning %d results for %r", len(results), location)
     return results
+    
