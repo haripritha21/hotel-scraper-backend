@@ -1,19 +1,10 @@
 """
-Google Maps hotel/restaurant scraper — v3 (restaurant-finder logic merged)
+Google Maps hotel scraper — v4 (hotel-finder fixed)
 
-Key improvements from restaurant-finder v2:
-  - SETTLE_WAIT increased to 1.8s (was 0.8s) for reliable h1 extraction
-  - Junk-name filter expanded to match restaurant-finder's stricter set
-  - _normalise_website_url mirrors restaurant-finder's full URL extraction
-  - All selector lists updated to match restaurant-finder's battle-tested order
-  - goto()-based navigation pattern (no stale element risk)
-
-Hotel-scraper specific features retained:
-  - Parallel tab scraping (PARALLEL_TABS = 4) for speed
-  - Haversine distance filtering with coordinate extraction from URL
-  - Address keyword fallback filter
-  - Category allowlist/blocklist (mess/cafe vs lodge/resort)
-  - Resource blocking (images/fonts/media) for faster page loads
+Fixes from v3:
+  - Category allowlist now includes hotel/lodge/resort/inn/hostel
+  - Category blocklist now blocks restaurants/mess/cafe/bakery
+  - Search query changed to "hotels near {location}"
 """
 
 import asyncio
@@ -35,12 +26,12 @@ from playwright.async_api import (
 logger = logging.getLogger(__name__)
 
 # ── Timing constants ──────────────────────────────────────────────────────────
-ELEMENT_WAIT  = 10_000   # ms — element wait timeout
-PAGE_TIMEOUT  = 60_000   # ms — page navigation timeout (increased for slow networks)
-SETTLE_WAIT   = 1.8      # s  — wait after navigation; critical for h1 to stabilise
-PARALLEL_TABS = 2        # reduced from 4 — prevents network saturation on slow connections
+ELEMENT_WAIT  = 10_000
+PAGE_TIMEOUT  = 60_000
+SETTLE_WAIT   = 1.8
+PARALLEL_TABS = 2
 
-# ── Junk-name filters (from restaurant-finder v2) ─────────────────────────────
+# ── Junk-name filters ─────────────────────────────────────────────────────────
 BLOCKED_EXACT: set[str] = {
     "results", "more results", "see more results", "all results",
     "open in google maps", "back to results", "search nearby",
@@ -57,7 +48,7 @@ BLOCKED_PARTIAL: tuple[str, ...] = (
     "suggest an",
 )
 
-# ── CSS selectors (battle-tested order from restaurant-finder) ────────────────
+# ── CSS selectors ─────────────────────────────────────────────────────────────
 FEED_CSS = ['div[role="feed"]', '.m6QErb[aria-label]', 'div.m6QErb']
 
 CARD_LINKS = [
@@ -112,7 +103,6 @@ SITE_CSS = [
 # ── Distance helpers ──────────────────────────────────────────────────────────
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Return straight-line distance in km between two lat/lon points."""
     R = 6371.0
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
@@ -121,12 +111,6 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _extract_coords_from_url(url: str) -> tuple[Optional[float], Optional[float]]:
-    """
-    Pull lat/lon from a Google Maps URL.
-    Tries two patterns:
-      /@<lat>,<lon>,<zoom>       — map centre after visiting a place
-      !3d<lat>!4d<lon>           — embedded in place URL
-    """
     m = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', url)
     if m:
         return float(m.group(1)), float(m.group(2))
@@ -137,10 +121,6 @@ def _extract_coords_from_url(url: str) -> tuple[Optional[float], Optional[float]
 
 
 def _address_matches_location(address: str, location: str) -> bool:
-    """
-    Returns True if at least ONE word from `location` appears in `address`.
-    Short words (≤2 chars) are skipped to avoid false positives.
-    """
     addr_lower = address.lower()
     for word in location.lower().split():
         if len(word) > 2 and word in addr_lower:
@@ -149,16 +129,7 @@ def _address_matches_location(address: str, location: str) -> bool:
 
 
 def _geocode_location(location: str) -> tuple[Optional[float], Optional[float]]:
-    """
-    Convert a location name to lat/lon using Nominatim (OpenStreetMap).
-    No API key needed. Returns (lat, lon) or (None, None) on failure.
-    Tries progressively shorter versions of the location if full query fails.
-    E.g. "thevarsilai,reserveline,satchiyapuram" →
-         tries full → "reserveline,satchiyapuram" → "satchiyapuram"
-    """
     parts = [p.strip() for p in location.replace("+", " ").split(",")]
-
-    # Try from most-specific (full) to least-specific (last word only)
     queries_to_try = []
     for i in range(len(parts)):
         queries_to_try.append(",".join(parts[i:]))
@@ -215,9 +186,7 @@ async def fetch_places(location: str, radius_km: float, max_results: int = 10) -
             "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         )
 
-        # ── Block images/fonts/media to load pages faster ─────────────────────
         async def block_heavy_resources(route):
-            # Block only binary assets — keep stylesheet so networkidle fires correctly
             if route.request.resource_type in ("image", "media", "font"):
                 await route.abort()
             else:
@@ -258,22 +227,20 @@ def _fetch_sync(location: str, radius_km: float, max_results: int = 10) -> list[
 async def _collect_results(
     page: Page, location: str, radius_km: float, max_results: int
 ) -> list[dict]:
+    # ✅ FIX 2: Search query — "hotels near" instead of "hotels+restaurants+near"
     query_url = (
         f"https://www.google.com/maps/search/"
-        f"hotels+restaurants+near+{location.replace(' ', '+')}"
+        f"hotels+near+{location.replace(' ', '+')}"
         f"?hl=en"
     )
     logger.info("Opening → %s", query_url)
     await page.goto(query_url, wait_until="networkidle", timeout=PAGE_TIMEOUT)
     await _handle_popups(page)
 
-    # ── Get centre coordinates ────────────────────────────────────────────────
-    # Tier 1: Nominatim geocoding — most reliable, works for any location name
     center_lat, center_lon = await asyncio.to_thread(_geocode_location, location)
     if center_lat:
         logger.info("Search centre (geocoded): %.5f, %.5f  radius=%.1f km", center_lat, center_lon, radius_km)
 
-    # Tier 2: search-results page URL (/@lat,lon,zoom pattern)
     if center_lat is None:
         await asyncio.sleep(2)
         current_url = page.url
@@ -281,9 +248,8 @@ async def _collect_results(
         if center_lat:
             logger.info("Search centre (page URL): %.5f, %.5f", center_lat, center_lon)
     else:
-        await asyncio.sleep(2)  # still wait for page to load
+        await asyncio.sleep(2)
 
-    # ── Wait for feed ─────────────────────────────────────────────────────────
     feed_ready = False
     for sel in FEED_CSS:
         try:
@@ -301,7 +267,6 @@ async def _collect_results(
     passes = min(24, max(6, (max_results // 5) + 4))
     await _scroll_panel(page, passes=passes)
 
-    # ── Collect place HREFs (not element references — no stale element risk) ──
     href_list: list[str] = []
     for sel in CARD_LINKS:
         nodes = await page.query_selector_all(sel)
@@ -325,7 +290,6 @@ async def _collect_results(
         logger.warning("No place URLs found")
         return []
 
-    # ── Tier 3: extract centre from first result href (!3d!4d pattern) ──────
     if center_lat is None:
         for href in href_list[:5]:
             lat, lon = _extract_coords_from_url(href)
@@ -344,7 +308,6 @@ async def _collect_results(
     limit = min(len(href_list), max(60, max_results * 6))
     candidates = href_list[:limit]
 
-    # ── Parallel scraping: PARALLEL_TABS pages at once ────────────────────────
     sem = asyncio.Semaphore(PARALLEL_TABS)
 
     async def scrape_one(href: str) -> Optional[dict]:
@@ -368,7 +331,6 @@ async def _collect_results(
         if not entry or not entry.get("name"):
             continue
 
-        # ── Junk filter ───────────────────────────────────────────────────────
         raw_name = entry["name"].strip().lower()
         if len(raw_name) < 3:
             continue
@@ -381,17 +343,18 @@ async def _collect_results(
         if name_key in name_seen:
             continue
 
-        # ── Category filter ───────────────────────────────────────────────────
         addr     = entry.get("address", "N/A")
         category = entry.get("category", "").lower()
-        allowed  = ("restaurant", "mess", "hotel", "cafe", "fast food", "bakery")
-        blocked  = ("lodge", "residency", "resort", "inn", "hostel")
+
+        # ✅ FIX 1: Hotel category filter — allow lodges/resorts, block restaurants
+        allowed  = ("hotel", "lodge", "resort", "inn", "hostel", "guest house", "homestay", "suites", "accommodation")
+        blocked  = ("restaurant", "mess", "cafe", "fast food", "bakery", "bar", "pub", "dhaba")
+
         if any(x in category for x in blocked):
             continue
         if category and not any(x in category for x in allowed):
             continue
 
-        # ── Location filter: haversine → address keyword fallback ─────────────
         place_lat, place_lon = _extract_coords_from_url(href)
 
         if place_lat is not None and center_lat is not None:
@@ -403,21 +366,18 @@ async def _collect_results(
                 )
                 continue
         elif center_lat is not None and place_lat is None:
-            # Have center but no place coords — skip if address doesn't match location
             if addr and addr != "N/A" and not _address_matches_location(addr, location):
                 logger.info(
                     "  ✗ SKIP (no place coords + address mismatch) — %s | %s", entry["name"], addr
                 )
                 continue
         else:
-            # No center coords at all — strict address keyword check
             if addr and addr != "N/A" and not _address_matches_location(addr, location):
                 logger.info(
                     "  ✗ SKIP (address mismatch) — %s | %s", entry["name"], addr
                 )
                 continue
 
-        # ── Address deduplication ─────────────────────────────────────────────
         if addr and addr != "N/A":
             addr_key = re.sub(r"\s+", " ", addr.lower().strip())[:100]
             if addr_key in addr_seen:
@@ -436,7 +396,7 @@ async def _parse_place_page(page: Page, url: str) -> Optional[dict]:
     await page.goto(url, wait_until="networkidle", timeout=PAGE_TIMEOUT)
     try:
         await page.wait_for_selector("h1", timeout=ELEMENT_WAIT)
-        await asyncio.sleep(SETTLE_WAIT)   # critical: let dynamic content settle (1.8s)
+        await asyncio.sleep(SETTLE_WAIT)
     except PlaywrightTimeoutError:
         return None
 
@@ -461,7 +421,6 @@ async def _parse_place_page(page: Page, url: str) -> Optional[dict]:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _get_text(page: Page, selectors: list[str]) -> str:
-    """Try each CSS selector in order; return first non-empty text found."""
     for sel in selectors:
         try:
             el = await page.query_selector(sel)
@@ -475,19 +434,16 @@ async def _get_text(page: Page, selectors: list[str]) -> str:
 
 
 async def _get_link(page: Page, selectors: list[str]) -> str:
-    """Try each CSS selector in order; return the first usable external URL."""
     for sel in selectors:
         try:
             el = await page.query_selector(sel)
             if not el:
                 continue
-            # Try href first, then aria-label
             for attr in ("href", "aria-label"):
                 raw = await el.get_attribute(attr)
                 url = _normalise_url(raw)
                 if url != "N/A":
                     return url
-            # Fallback: text content
             val = await el.text_content()
             url = _normalise_url(val)
             if url != "N/A":
@@ -495,7 +451,6 @@ async def _get_link(page: Page, selectors: list[str]) -> str:
         except Exception:
             continue
 
-    # Last resort: JS scan for any anchor hinting at 'website' or 'authority'
     try:
         candidates = await page.evaluate(
             """
@@ -523,7 +478,6 @@ async def _get_link(page: Page, selectors: list[str]) -> str:
 
 
 def _normalise_url(value: Optional[str]) -> str:
-    """Convert Google Maps website values into a clean official URL."""
     if not value:
         return "N/A"
     raw = _sanitise(value).replace("Website:", "", 1).strip()
@@ -531,7 +485,6 @@ def _normalise_url(value: Optional[str]) -> str:
         return "N/A"
     parsed = urlparse(raw)
 
-    # Unwrap Google redirect URLs
     if parsed.netloc and "google." in parsed.netloc:
         params = parse_qs(parsed.query)
         for key in ("q", "url"):
@@ -540,13 +493,11 @@ def _normalise_url(value: Optional[str]) -> str:
                 return _normalise_url(unquote(target))
         return "N/A"
 
-    # Accept clean http/https URLs (not Google CDN)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         if any(b in parsed.netloc for b in ("google.", "gstatic.", "ggpht.")):
             return "N/A"
         return raw
 
-    # Extract bare domain from free-text
     m = re.search(
         r"((?:www\.)?[a-zA-Z0-9][a-zA-Z0-9-]*(?:\.[a-zA-Z0-9-]+)+)(?:/[^\s]*)?",
         raw,
@@ -558,14 +509,12 @@ def _normalise_url(value: Optional[str]) -> str:
 
 
 def _sanitise(text: str) -> str:
-    """Remove Google Maps icon glyphs and normalize whitespace."""
     cleaned = re.sub(r"[\ue000-\uf8ff]", "", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or "N/A"
 
 
 async def _handle_popups(page: Page) -> None:
-    """Silently dismiss cookie-consent or GDPR dialogs if they appear."""
     for sel in [
         'button[aria-label="Accept all"]',
         'button[aria-label="Reject all"]',
@@ -583,7 +532,6 @@ async def _handle_popups(page: Page) -> None:
 
 
 async def _scroll_panel(page: Page, passes: int = 6) -> None:
-    """Scroll the results feed multiple times to load all lazy-loaded items."""
     for sel in FEED_CSS:
         feed = await page.query_selector(sel)
         if feed:
@@ -598,7 +546,6 @@ async def _scroll_panel(page: Page, passes: int = 6) -> None:
 
 
 def _parse_rating(r: dict) -> float:
-    """Parse rating to float for sorting; invalid → 0."""
     try:
         return float(str(r.get("rating", "0")).replace(",", "."))
     except (ValueError, TypeError):
